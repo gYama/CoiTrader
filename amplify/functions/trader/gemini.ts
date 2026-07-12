@@ -1,4 +1,5 @@
 import type { HoldingInfo } from '../shared/portfolio';
+import type { TechnicalIndicators } from './indicators';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -32,6 +33,16 @@ export interface MarketPairInfo {
   priceHistory24h?: number[];
   /** 過去7日間の価格履歴(6時間ごと、古い順) */
   priceHistory7d?: number[];
+  /** コード側で計算済みのテクニカル指標(データ不足の項目は省略される) */
+  indicators?: TechnicalIndicators;
+}
+
+/** 直近に提案されたが実行できなかった注文(ガードレール見送り・注文APIエラー) */
+export interface RecentSkipInfo {
+  hoursAgo: number;
+  pair?: string;
+  action?: string;
+  reason?: string;
 }
 
 /** このシステム自身が過去に執行した実注文(成績フィードバック用) */
@@ -58,6 +69,8 @@ export interface PortfolioSnapshot {
     maxCoinSharePct: number;
     minJpyReserve: number;
     minLiquidityJpy: number;
+    /** 同時に保有してよい銘柄数の上限。小資本での過剰分散を防ぐ */
+    maxHoldings: number;
   };
   /** 総資産の実績変化率。自分の成績を踏まえて判断させる */
   performance?: {
@@ -66,6 +79,8 @@ export interface PortfolioSnapshot {
   };
   /** 直近の実注文履歴。往復売買(直近の判断の無根拠な反転)を防ぐ */
   recentOrders?: RecentOrderInfo[];
+  /** 直近に実行できなかった提案。同じ提案の無限ループを防ぐ */
+  recentSkips?: RecentSkipInfo[];
 }
 
 const DECISION_SCHEMA = {
@@ -105,7 +120,10 @@ export async function askGeminiForDecision(
     '方針:',
     `- 1銘柄への集中を避ける。1銘柄の割合が ${snapshot.constraints.maxCoinSharePct}% を超える追加買いは提案しない`,
     '- 割合が突出した銘柄は一部売却(sell_half)してリバランスを検討する',
-    `- 24時間売買代金が ${snapshot.constraints.minLiquidityJpy} 円未満の流動性の低いペアは成行が大きく滑るため提案しない`,
+    `- 24時間売買代金が ${snapshot.constraints.minLiquidityJpy} 円未満のペアへの新規買い(buy)は成行が大きく滑るため提案しない。` +
+      '既存保有の売却(sell_all/sell_half)は脱出手段としてその1/10の売買代金まで許容される',
+    `- 同時保有銘柄数の上限は ${snapshot.constraints.maxHoldings} 銘柄。上限に達している間は未保有銘柄の buy は執行されないため提案しない。` +
+      '見込みの薄い銘柄を売却して枠を空けるか、既存銘柄の買い増しを検討する',
     '- markets の takerFeePct は成行手数料率(%)。手数料無料(0)のペアを優先する。' +
       '有料ペアは往復の手数料を差し引いても利益が見込める強い根拠がある場合のみ提案する',
     '- 含み益が十分に乗った銘柄は全量(sell_all)または半量(sell_half)を利確して現金に戻し、小さな利益を確実に積み上げる',
@@ -119,6 +137,12 @@ export async function askGeminiForDecision(
       '新しい根拠なしに直近の売買を反転させる(買った直後に売る等)提案はしない',
     '- performance は総資産の実績変化率。悪化が続くときは新規買いを減らし現金比率を高める',
     '- markets の priceHistory24h (過去24時間、1時間ごと) および priceHistory7d (過去7日間、6時間ごと) は価格の時系列データ(古い順)です。トレンド(上昇・下降)やボラティリティを分析し、判断の精度向上に役立ててください。',
+    '- markets の indicators はコード側で計算済みのテクニカル指標: rsi14 (RSI(14)。70超=買われすぎ, 30未満=売られすぎ)、' +
+      'ma6hDevPct (6時間移動平均からの乖離率%。プラスは短期的な上振れ)、vol24hPct (1時間リターンの標準偏差%。大きいほど荒い)、' +
+      'range7dPosPct (7日レンジ内の位置。0=安値圏, 100=高値圏)。印象ではなくこれらの数値を根拠に判断すること',
+    '- 各注文の reason には必ず具体的な数値根拠(RSI・乖離率・レンジ位置・含み損益率など)を1つ以上含めること。' +
+      '「流動性が高い」「分散に適している」だけの理由では提案しない',
+    '- recentSkips は直近に提案されたが実行できなかった注文とその理由。同じ条件のまま同じ提案を繰り返さない',
     '',
     `現在のポートフォリオと市場データ (JSON): ${JSON.stringify(snapshot)}`,
     '',

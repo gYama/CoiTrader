@@ -4,8 +4,10 @@ import { CoincheckClient, type AccountInfo, type PairTicker } from './coincheck'
 import { buildPerformance, computeCostBasis, computeDrawdownPct, type CostBasis } from './feedback';
 import { notifyError } from './notify';
 import { askGeminiForDecision, type PortfolioSnapshot, type ProposedOrder } from './gemini';
+import { buildIndicators } from './indicators';
 import {
   getBreakerBaseline,
+  queryRecentEvents,
   queryRecentOrders,
   querySnapshots,
   saveEvent,
@@ -76,7 +78,13 @@ interface Config {
   /** 総資産のこの割合(%)は常に円で保持する */
   jpyReservePct: number;
   minConfidence: number;
+  /** 新規買いを許可する24時間売買代金(円)の下限。売却はこの1/10まで許容(脱出手段の確保) */
   minLiquidityJpy: number;
+  /** 同時保有銘柄数の上限。小資本での過剰分散(=スリッページ表面積の増加)を防ぐ */
+  maxHoldings: number;
+  /** Gemini への売買判断を行う間隔(分)。記録・ブレーカー・ストップロスは15分ごとのまま。
+   * 15分サイクルの倍数(15/30/60)のみサポート */
+  decisionIntervalMinutes: number;
   /** 取得単価からこの割合(%)下落したら Gemini の判断を待たず全量売却する。0以下で無効 */
   stopLossPct: number;
   excludePairs: Set<string>;
@@ -98,6 +106,8 @@ function loadConfig(): Config {
     jpyReservePct: Number(process.env.JPY_RESERVE_PCT ?? 10),
     minConfidence: Number(process.env.MIN_CONFIDENCE ?? 0.7),
     minLiquidityJpy: Number(process.env.MIN_LIQUIDITY_JPY ?? 100000),
+    maxHoldings: Number(process.env.MAX_HOLDINGS ?? 6),
+    decisionIntervalMinutes: Number(process.env.DECISION_INTERVAL_MINUTES ?? 15),
     stopLossPct: Number(process.env.STOP_LOSS_PCT ?? 10),
     excludePairs: new Set(
       (process.env.EXCLUDE_PAIRS ?? '')
@@ -328,6 +338,21 @@ export async function runTradingCycle(): Promise<void> {
   // 損切りした銘柄は今サイクルの判断対象から外す(売却代金は次サイクルから使う)
   const activeHoldings = holdings.filter((h) => !stopped.has(h.currency));
 
+  // 判断間引き: スナップショット・ブレーカー・ストップロスは15分ごとに回し続けるが、
+  // Gemini への売買判断は DECISION_INTERVAL_MINUTES ごとに1回だけ行う。
+  // 15分ごとの再判断はほぼ同一の入力に対する再抽選となり、ノイズ売買と
+  // API コストを生むだけだった(実績: 同じ提案を5時間繰り返した)。
+  // EventBridge は毎時 :00/:15/:30/:45 に起動するため、壁時計の分で判定できる
+  if (config.decisionIntervalMinutes > 15) {
+    const minutes = new Date().getMinutes();
+    if (minutes % config.decisionIntervalMinutes >= 15) {
+      console.log(
+        `decision skipped: interval ${config.decisionIntervalMinutes}m (snapshot/stop-loss/breaker still ran)`,
+      );
+      return;
+    }
+  }
+
   // 取得単価が復元できる銘柄には含み損益を付けて Gemini に渡す
   for (const h of activeHoldings) {
     const b = costBasis.get(h.currency);
@@ -348,18 +373,43 @@ export async function runTradingCycle(): Promise<void> {
     reason: e.reason,
   }));
 
+  // 直近48時間に実行できなかった提案(ガードレール見送り・注文APIエラー)。
+  // これを渡さないと Gemini は失敗を知らないまま同じ提案を延々と繰り返す
+  // (実績: 最低数量不足の ETH 買いを5時間提案し続けた)。ペア×アクションで重複排除する
+  const skipSeen = new Set<string>();
+  const recentSkips = (await queryRecentEvents(60))
+    .filter((e) => e.type === 'skip' && e.t >= nowMs - 48 * 3600_000)
+    .filter((e) => {
+      const key = `${e.pair}|${e.action}`;
+      if (skipSeen.has(key)) return false;
+      skipSeen.add(key);
+      return true;
+    })
+    .slice(0, 8)
+    .map((e) => ({
+      hoursAgo: Math.round(((nowMs - e.t) / 3600_000) * 10) / 10,
+      pair: e.pair,
+      action: e.action,
+      reason: e.reason,
+    }));
+
   const snapshot: PortfolioSnapshot = {
-    markets: [...tickers.values()].map((t) => ({
-      pair: t.pair,
-      last: t.last,
-      high24h: t.high,
-      low24h: t.low,
-      changePct24h: t.price_change_percent_24h * 100,
-      quoteVolumeJpy: Math.round(t.quote_volume),
-      takerFeePct: takerFeePctFor(t.pair, accounts),
-      priceHistory24h: getPriceHistory(snapshots, t.pair, 24, 1),
-      priceHistory7d: getPriceHistory(snapshots, t.pair, 24 * 7, 6),
-    })),
+    markets: [...tickers.values()].map((t) => {
+      const priceHistory24h = getPriceHistory(snapshots, t.pair, 24, 1);
+      const priceHistory7d = getPriceHistory(snapshots, t.pair, 24 * 7, 6);
+      return {
+        pair: t.pair,
+        last: t.last,
+        high24h: t.high,
+        low24h: t.low,
+        changePct24h: t.price_change_percent_24h * 100,
+        quoteVolumeJpy: Math.round(t.quote_volume),
+        takerFeePct: takerFeePctFor(t.pair, accounts),
+        priceHistory24h,
+        priceHistory7d,
+        indicators: buildIndicators(priceHistory24h, priceHistory7d),
+      };
+    }),
     portfolio: { jpyAvailable, totalAssetsJpy, holdings: activeHoldings },
     constraints: {
       maxOrdersPerCycle: config.maxOrdersPerCycle,
@@ -367,9 +417,11 @@ export async function runTradingCycle(): Promise<void> {
       maxCoinSharePct: config.maxCoinSharePct,
       minJpyReserve: Math.ceil(minJpyReserve),
       minLiquidityJpy: config.minLiquidityJpy,
+      maxHoldings: config.maxHoldings,
     },
     performance,
     recentOrders,
+    recentSkips,
   };
 
   console.log('portfolio snapshot:', JSON.stringify(snapshot.portfolio));
@@ -596,11 +648,15 @@ async function executeWithGuardrails(
       config.dryRun,
     );
   }
-  // 流動性ガード: 板が薄いペアへの成行は滑りが大きすぎる
-  if (ticker.quote_volume < config.minLiquidityJpy) {
+  // 流動性ガード: 板が薄いペアへの成行は滑りが大きすぎる。
+  // 買いは厳格に(自分から薄い板に入らない)、売りは既存ポジションの脱出手段なので
+  // 床を1/10に緩めて塩漬けを防ぐ
+  const liquidityFloor =
+    order.action === 'buy' ? config.minLiquidityJpy : config.minLiquidityJpy / 10;
+  if (ticker.quote_volume < liquidityFloor) {
     return skipOrder(
       order,
-      `24時間売買代金 ${Math.round(ticker.quote_volume)} 円が流動性下限 ${config.minLiquidityJpy} 円未満`,
+      `24時間売買代金 ${Math.round(ticker.quote_volume)} 円が流動性下限 ${Math.round(liquidityFloor)} 円未満`,
       config.dryRun,
     );
   }
@@ -610,6 +666,20 @@ async function executeWithGuardrails(
   const minLot = MIN_LOT[currency] ?? 0;
 
   if (order.action === 'buy') {
+    // 銘柄数ガード: 小資本で銘柄数を増やすと1銘柄の勝ちが総資産に効かず、
+    // スリッページと最低売却数量の制約だけが増える。新規銘柄は上限未満のときのみ。
+    // 評価額が最低注文額未満の保有(塩漬けダスト)は「保有銘柄」に数えない
+    const significantCount = [...ctx.holdingByCurrency.values()].filter(
+      (h) => h.jpyValue >= MIN_ORDER_NOTIONAL_JPY,
+    ).length;
+    const isNewPosition = (holding?.jpyValue ?? 0) < MIN_ORDER_NOTIONAL_JPY;
+    if (isNewPosition && significantCount >= config.maxHoldings) {
+      return skipOrder(
+        order,
+        `保有銘柄数 ${significantCount} が上限 ${config.maxHoldings} に達しているため新規銘柄は買わない`,
+        config.dryRun,
+      );
+    }
     // 集中ガード: この銘柄がポートフォリオの上限割合を超える買いはしない
     const currentValue = holding?.jpyValue ?? 0;
     const shareRoom = (ctx.totalAssetsJpy * config.maxCoinSharePct) / 100 - currentValue;
