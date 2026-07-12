@@ -1,0 +1,23 @@
+node_modules/
+.amplify/
+amplify_outputs.json
+.env
+*.log
+.DS_Store
+dist/
+BUILD.txt
+
+# Temporary output files
+out*.json
+
+# Documentation
+docs/
+
+# AI Agent configuration files
+.claude/
+.clauderc
+.cursorrules
+.windsurfrules
+GEMINI.md
+prompt.md
+.github/copilot-instructions.md
