@@ -45,7 +45,9 @@ export const trader = defineFunction({
     EXCLUDE_PAIRS: '',
     // 目標資産額(円)。売買判断には渡さず、進捗ログとメトリクスにのみ使う
     GOAL_ASSETS_JPY: '1300000000',
-    // 使用する Gemini モデル
-    GEMINI_MODEL: 'gemini-3.5-flash',
+    // 使用する Gemini モデル（カンマ区切りで複数指定した場合、フォールバックとして順に試行）
+    GEMINI_MODEL: 'gemini-3.1-flash-lite,gemini-3.5-flash,gemini-3.0-flash,gemini-2.5-flash,gemini-2.5-flash-lite',
+    // 複数モデル・複数APIキー指定時のフォールバック順序 ('KEY_FIRST' | 'MODEL_FIRST')
+    FALLBACK_STRATEGY: 'KEY_FIRST',
   },
 });

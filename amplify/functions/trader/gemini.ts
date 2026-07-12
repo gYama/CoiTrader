@@ -90,10 +90,10 @@ const DECISION_SCHEMA = {
 } as const;
 
 export async function askGeminiForDecision(
-  apiKey: string,
-  model: string,
+  apiKeys: string[],
+  models: string[],
   snapshot: PortfolioSnapshot,
-  fallbackApiKey?: string,
+  strategy: 'KEY_FIRST' | 'MODEL_FIRST'
 ): Promise<PortfolioDecision> {
   const prompt = [
     'あなたは慎重なリスク管理を最優先する暗号資産ポートフォリオマネージャーです。',
@@ -134,8 +134,8 @@ export async function askGeminiForDecision(
     },
   });
 
-  const attemptFetch = async (key: string) => {
-    return fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
+  const attemptFetch = async (key: string, model: string): Promise<PortfolioDecision> => {
+    const res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -143,39 +143,59 @@ export async function askGeminiForDecision(
       },
       body: bodyString,
     });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`${res.status} ${errText}`);
+    }
+
+    const json = (await res.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      throw new Error(`Gemini returned no text: ${JSON.stringify(json)}`);
+    }
+
+    const decision = JSON.parse(text) as PortfolioDecision;
+
+    // モデル出力を信用しすぎない: 値域と形式をコード側で強制する
+    decision.orders = (Array.isArray(decision.orders) ? decision.orders : [])
+      .filter((o) => o && ['buy', 'sell_all', 'sell_half'].includes(o.action) && typeof o.pair === 'string')
+      .map((o) => ({
+        ...o,
+        confidence: clamp01(o.confidence),
+      }));
+    return decision;
   };
 
-  let res = await attemptFetch(apiKey);
+  let lastError: Error | null = null;
 
-  if (!res.ok && fallbackApiKey) {
-    const errText = await res.text();
-    console.warn(`Gemini API error with main key: ${res.status} ${errText}. Retrying with fallback key...`);
-    res = await attemptFetch(fallbackApiKey);
+  if (strategy === 'KEY_FIRST') {
+    for (const model of models) {
+      for (const key of apiKeys) {
+        try {
+          return await attemptFetch(key, model);
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          console.warn(`Gemini API error with model ${model} and key ***: ${lastError.message}. Retrying...`);
+        }
+      }
+    }
+  } else {
+    for (const key of apiKeys) {
+      for (const model of models) {
+        try {
+          return await attemptFetch(key, model);
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          console.warn(`Gemini API error with model ${model} and key ***: ${lastError.message}. Retrying...`);
+        }
+      }
+    }
   }
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Gemini API error: ${res.status} ${errText}`);
-  }
-
-  const json = (await res.json()) as {
-    candidates?: { content?: { parts?: { text?: string }[] } }[];
-  };
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) {
-    throw new Error(`Gemini returned no text: ${JSON.stringify(json)}`);
-  }
-
-  const decision = JSON.parse(text) as PortfolioDecision;
-
-  // モデル出力を信用しすぎない: 値域と形式をコード側で強制する
-  decision.orders = (Array.isArray(decision.orders) ? decision.orders : [])
-    .filter((o) => o && ['buy', 'sell_all', 'sell_half'].includes(o.action) && typeof o.pair === 'string')
-    .map((o) => ({
-      ...o,
-      confidence: clamp01(o.confidence),
-    }));
-  return decision;
+  throw new Error(`All Gemini API fallback attempts failed. Last error: ${lastError?.message}`);
 }
 
 function clamp01(n: number): number {

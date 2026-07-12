@@ -77,7 +77,8 @@ interface Config {
   /** 取得単価からこの割合(%)下落したら Gemini の判断を待たず全量売却する。0以下で無効 */
   stopLossPct: number;
   excludePairs: Set<string>;
-  geminiModel: string;
+  geminiModels: string[];
+  fallbackStrategy: 'KEY_FIRST' | 'MODEL_FIRST';
   /** 目標資産額(円)。判断には使わず、進捗ログにのみ使う */
   goalAssetsJpy: number;
   /** 24時間の最大許容ドローダウン(%)。これを超えると自動停止 */
@@ -101,7 +102,11 @@ function loadConfig(): Config {
         .map((s) => s.trim())
         .filter(Boolean),
     ),
-    geminiModel: process.env.GEMINI_MODEL ?? 'gemini-3.5-flash',
+    geminiModels: (process.env.GEMINI_MODEL ?? 'gemini-3.5-flash')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    fallbackStrategy: process.env.FALLBACK_STRATEGY === 'MODEL_FIRST' ? 'MODEL_FIRST' : 'KEY_FIRST',
     goalAssetsJpy: Number(process.env.GOAL_ASSETS_JPY ?? 1_300_000_000),
     maxDrawdown24hPct: Number(process.env.MAX_DRAWDOWN_24H_PCT ?? 10),
   };
@@ -367,11 +372,16 @@ export async function runTradingCycle(): Promise<void> {
   console.log('portfolio snapshot:', JSON.stringify(snapshot.portfolio));
 
   // 3. Gemini にポートフォリオ全体の売買判断を依頼
-  const decision = await askGeminiForDecision(
+  const apiKeys = [
     requireEnv('GEMINI_API_KEY'),
-    config.geminiModel,
-    snapshot,
     process.env.GEMINI_API_KEY_FALLBACK,
+  ].filter((k): k is string => Boolean(k));
+
+  const decision = await askGeminiForDecision(
+    apiKeys,
+    config.geminiModels,
+    snapshot,
+    config.fallbackStrategy,
   );
   console.log('gemini outlook:', decision.outlook);
   console.log('gemini proposed orders:', JSON.stringify(decision.orders));
