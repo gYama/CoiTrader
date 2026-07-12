@@ -18,7 +18,13 @@ if (!DEMO) {
 
 export default function App() {
   if (DEMO) {
-    return <Dashboard api={mockApi} userEmail="demo@example.com" onSignOut={() => {}} />;
+    // 本番(認証後)と同じDOM構造にする。auth-bg の flex レイアウトが
+    // ダッシュボードの幅計算に影響するため、デモでも同じ条件で確認できるようにする
+    return (
+      <div className="auth-bg">
+        <Dashboard api={mockApi} userEmail="demo@example.com" onSignOut={() => {}} />
+      </div>
+    );
   }
   return (
     <div className="auth-bg">

@@ -45,6 +45,11 @@ body {
 }
 
 .fortune-root {
+  /* 親の .auth-bg が flex のため、width 未指定だと flex 子の fit-content 計算で
+     コンテンツの内在幅(ティッカー等)まで広がり、スマホで画面幅を無視して溢れる。
+     width:100% で常にビューポート基準にし、max-width で上限だけ制める */
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1080px;
   margin: 0 auto;
   padding: 20px 16px 48px;
