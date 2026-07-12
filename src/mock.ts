@@ -158,6 +158,7 @@ const status: StatusData = {
     JPY_RESERVE_PCT: '10',
     MIN_CONFIDENCE: '0.7',
     MIN_LIQUIDITY_JPY: '100000',
+    EXCLUDE_PAIRS: 'mona_jpy,bril_jpy,fpl_jpy,iost_jpy,sand_jpy,dai_jpy',
     GOAL_ASSETS_JPY: '1300000000',
     GEMINI_MODEL: 'gemini-3.5-flash',
   },
