@@ -1,7 +1,12 @@
 [English](#english) | [日本語](#japanese)
 
 <a id="english"></a>
-# coi-trader — Coincheck × Gemini Automated Trading Bot (AWS Amplify)
+<div align="center">
+  <img src="public/koi_icon.png" width="120" alt="CoiTrader Icon">
+  <h1>CoiTrader</h1>
+  <p>Coincheck × Gemini Automated Trading Bot (AWS Amplify)</p>
+  <img src="public/koi_bg.png" width="600" alt="CoiTrader Dashboard">
+</div>
 
 A **database-free, completely stateless** automated cryptocurrency trading application. 
 It fetches market data for **all pairs** available on the Coincheck exchange, passes the market data and your entire portfolio to Google Gemini for rebalancing and trading decisions, strictly enforces safety guardrails (diversification, order caps) in the code, and then executes market orders.
@@ -146,12 +151,19 @@ All settings can be modified in the `environment` section of [resource.ts](ampli
 | `GOAL_ASSETS_JPY` | `1300000000` | Target goal. Used for logs/metrics only. |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | The Gemini model to use. |
 
+### Optional: Error Webhook
+
+To receive notifications for critical bot failures (e.g., via Google Chat), create a `SecureString` parameter in AWS Systems Manager (Parameter Store) named `/coi-trader/error-webhook-url` and set your webhook URL as the value. The bot will automatically detect and use it.
+
 You can also change the execution frequency via `schedule: 'every 15m'` in the same file.
 
 ## Estimated Costs
 
 - **AWS Lambda**: 15 min intervals × 128~256MB × a few seconds → **Within Free Tier**
 - **AWS EventBridge**: Free
+- **Amazon DynamoDB**: On-Demand. Minor writes every 15 min + reads for dashboard → **Within Free Tier**
+- **Amazon CloudWatch**: Logs and custom metrics. Minimal data volume → **Within Free Tier**
+- **Amazon API Gateway & Cognito**: Low traffic for personal dashboard → **Within Free Tier**
 - **Gemini**: Few hundred tokens per run → Minimal cost (Free Tier available)
 - **Coincheck**: API usage is free (Trading fees apply separately)
 
@@ -162,7 +174,12 @@ This project is licensed under the [MIT License](LICENSE).
 ---
 
 <a id="japanese"></a>
-# coi-trader — Coincheck × Gemini 自動売買 (AWS Amplify)
+<div align="center">
+  <img src="public/koi_icon.png" width="120" alt="CoiTrader Icon">
+  <h1>CoiTrader</h1>
+  <p>Coincheck × Gemini 自動売買 (AWS Amplify)</p>
+  <img src="public/koi_bg.png" width="600" alt="CoiTrader Dashboard">
+</div>
 
 Coincheck の**取引所で扱う全ペア**を対象に、相場とポートフォリオ全体を Google Gemini に渡してリバランス・売買判断をさせ、分散・上限などのガードレールをコード側で強制した上で成行注文を出す、**データベース不要・完全ステートレス**な自動売買アプリです。
 
@@ -312,12 +329,19 @@ npx ampx sandbox
 | `GOAL_ASSETS_JPY` | `1300000000` | 目標資産額。ログとメトリクスにのみ使用 |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | 使用モデル |
 
+### オプション: エラー通知用 Webhook
+
+ボットの異常停止など深刻なエラーを Google Chat や Slack 等で受け取りたい場合は、AWS Systems Manager (パラメータストア) で名前を `/coi-trader/error-webhook-url`、型を `SecureString` としたパラメータを作成し、Webhook URL を登録してください。ボットが自動的に検知して通知を送信します。
+
 実行頻度は同ファイルの `schedule: 'every 15m'` で変更できます。
 
 ## コスト目安
 
 - Lambda: 15分間隔 × 128〜256MB × 数秒 → **無料枠内**
 - EventBridge スケジュール: 無料
+- DynamoDB: 15分ごとの記録とダッシュボードからの閲覧（オンデマンド） → **無料枠内**
+- CloudWatch: ログとメトリクスの保存。ごくわずかなデータ量 → **無料枠内**
+- API Gateway & Cognito: 個人利用のアクセスのみ → **無料枠内**
 - Gemini 2.5 Flash: 1回あたり数百トークン → 月数円程度(無料枠あり)
 - Coincheck: API利用は無料(取引手数料は別途)
 
