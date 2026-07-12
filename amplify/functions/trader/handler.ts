@@ -55,11 +55,14 @@ async function isTradingEnabled(): Promise<boolean> {
 
 // 成行注文の最低金額(円換算)。これ未満は取引所に拒否されるか手数料負けする
 const MIN_ORDER_NOTIONAL_JPY = 500;
-// 取引所の最低注文数量が大きい通貨(2026-07時点: BTC系は0.005)。
-// 買いでこの数量に届かないポジションは売却できず塩漬けになるため、買い自体を見送る
+// 取引所の最低注文数量が大きい通貨(2026-07時点: BTC系は0.005、ETHは0.01)。
+// 買いでこの数量に届かないポジションは売却できず塩漬けになるため、買い自体を見送る。
+// ETH は実際に "Amount is less than the minimum trade amount (0.01 ETH)" で
+// 買い注文が拒否され続けた実績があるため必ず登録しておくこと
 const MIN_LOT: Record<string, number> = {
   btc: 0.005,
   wbtc: 0.005,
+  eth: 0.01,
 };
 
 interface Config {
@@ -430,6 +433,16 @@ export async function runTradingCycle(): Promise<void> {
       }
     } catch (err) {
       console.error(`order failed for ${order.pair}:`, err);
+      // 失敗も履歴に残す。残さないと Gemini が同じ提案を延々と繰り返し、
+      // ダッシュボードからも「提案が消えた」ように見えてしまう
+      const message = err instanceof Error ? err.message : String(err);
+      await saveEvent({
+        type: 'skip',
+        dryRun: config.dryRun,
+        pair: order.pair,
+        action: order.action,
+        reason: `注文APIエラー: ${message}`,
+      }).catch((saveErr) => console.error('failed to save order-failure event:', saveErr));
     }
   }
   console.log(`cycle done: ${executed} order(s) ${config.dryRun ? 'simulated' : 'executed'}`);
