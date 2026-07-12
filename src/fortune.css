@@ -27,6 +27,9 @@
   --rgb-card-2: 250, 250, 250;
 }
 
+/* 横スクロール/ズームアウトの保険。想定外の長い文字列が紛れても画面幅を超えさせない */
+html { overflow-x: hidden; }
+
 body {
   margin: 0;
   /* 金の光背 + 極薄のブループリント状グリッドで「トレーディング端末」の質感を出す */
@@ -650,7 +653,8 @@ td.down { color: var(--down); text-shadow: 0 0 7px var(--down-glow); }
   font-size: 13px;
 }
 .config-key { color: var(--muted); }
-.config-value { color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+/* EXCLUDE_PAIRS のようなスペースなしの長い値でも折り返し、画面幅を押し広げない */
+.config-value { color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; min-width: 0; }
 
 /* ===== 設定 / 危険ゾーン ===== */
 .settings-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
