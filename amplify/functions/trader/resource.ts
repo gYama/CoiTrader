@@ -14,6 +14,7 @@ export const trader = defineFunction({
     COINCHECK_API_KEY: secret('COINCHECK_API_KEY'),
     COINCHECK_API_SECRET: secret('COINCHECK_API_SECRET'),
     GEMINI_API_KEY: secret('GEMINI_API_KEY'),
+    GEMINI_API_KEY_FALLBACK: secret('GEMINI_API_KEY_FALLBACK'),
 
     // ---- 安全設定(コード側で強制されるガードレール) ----
     // 'true' の間は注文を送信せず、判断結果をログに出すだけ

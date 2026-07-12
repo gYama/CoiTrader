@@ -8,7 +8,7 @@
   <img src="public/koi_bg.png" width="600" alt="CoiTrader Dashboard">
 </div>
 
-A **database-free, completely stateless** automated cryptocurrency trading application. 
+A **stateless** automated cryptocurrency trading application that relies on real-time data. 
 It fetches market data for **all pairs** available on the Coincheck exchange, passes the market data and your entire portfolio to Google Gemini for rebalancing and trading decisions, strictly enforces safety guardrails (diversification, order caps) in the code, and then executes market orders.
 
 Because it runs as a scheduled AWS Amplify Gen 2 Lambda function, it operates 24/7 in the cloud without needing a PC or smartphone running.
@@ -38,7 +38,7 @@ Browser (React / Wealth Dashboard)
               POST /trading … Toggle automated trading ON/OFF (updates SSM parameter).
 ```
 
-No database is needed because the state is fetched fresh from Coincheck every time (only the ON/OFF switch is stored in AWS SSM Parameter Store). Asset history is tracked via CloudWatch Metrics, and trade history can be viewed on the Coincheck dashboard and CloudWatch Logs.
+The core trading logic is completely stateless, as portfolio and market states are fetched fresh from Coincheck every time. DynamoDB is only used to store historical snapshots and bot decision logs for the dashboard and performance metrics.
 
 ## Dashboard
 
@@ -70,7 +70,7 @@ Regardless of what Gemini proposes, the code enforces the following rules:
 
 ## Goal and Progress Tracking
 
-The bot logs its progress towards `GOAL_ASSETS_JPY` (default 1.3 Billion JPY) every cycle and records the total asset value as a CloudWatch Custom Metric (`CoinGod/TotalAssetsJpy` using EMF format, no DB required). You can visualize years of asset growth directly in CloudWatch graphs.
+The bot logs its progress towards `GOAL_ASSETS_JPY` (default 1.3 Billion JPY) every cycle and records the total asset value as a CloudWatch Custom Metric (`CoinGod/TotalAssetsJpy` using EMF format). You can visualize years of asset growth directly in CloudWatch graphs.
 
 **Note**: The goal amount is NOT passed to the Gemini prompt. This is intentional. Asking the model to "turn 13,000 JPY into 1.3 Billion JPY" encourages high-risk, low-probability gambling behavior. The objective function for the LLM is strictly fixed to "long-term compound growth avoiding drawdowns."
 
@@ -108,6 +108,7 @@ After setting up your AWS account and credentials (e.g. `aws configure`):
 npx ampx sandbox secret set COINCHECK_API_KEY
 npx ampx sandbox secret set COINCHECK_API_SECRET
 npx ampx sandbox secret set GEMINI_API_KEY
+npx ampx sandbox secret set GEMINI_API_KEY_FALLBACK # Optional
 npx ampx sandbox secret set ALLOWED_EMAILS
 
 # Deploy as a sandbox (remains deployed while running)
@@ -125,7 +126,8 @@ During or after deployment, open the **AWS Management Console for Amplify (Envir
 1. `COINCHECK_API_KEY`
 2. `COINCHECK_API_SECRET`
 3. `GEMINI_API_KEY`
-4. `ALLOWED_EMAILS`
+4. `GEMINI_API_KEY_FALLBACK` (Optional)
+5. `ALLOWED_EMAILS`
 
 ### 5. Switch to Live Trading
 
@@ -181,7 +183,7 @@ This project is licensed under the [MIT License](LICENSE).
   <img src="public/koi_bg.png" width="600" alt="CoiTrader Dashboard">
 </div>
 
-Coincheck の**取引所で扱う全ペア**を対象に、相場とポートフォリオ全体を Google Gemini に渡してリバランス・売買判断をさせ、分散・上限などのガードレールをコード側で強制した上で成行注文を出す、**データベース不要・完全ステートレス**な自動売買アプリです。
+Coincheck の**取引所で扱う全ペア**を対象に、相場とポートフォリオ全体を Google Gemini に渡してリバランス・売買判断をさせ、分散・上限などのガードレールをコード側で強制した上で成行注文を出す、**残高管理DBを持たないステートレス**な自動売買アプリです。
 
 AWS Amplify Gen 2 のスケジュール付き Lambda 関数として動くので、PC やスマホを起動しておく必要はなく、24時間365日クラウド側で実行されます。
 
@@ -211,7 +213,7 @@ EventBridge (15分ごと)
               POST /trading … 自動売買 ON/OFF (SSMパラメータを書き換え)
 ```
 
-状態は毎回 Coincheck から取得するため DB は不要です(ON/OFFスイッチのみ SSM Parameter Store に保持)。資産推移は CloudWatch メトリクス、取引履歴は Coincheck の取引画面と CloudWatch Logs で確認できます。
+現在の資産状況や相場は毎回 Coincheck から取得するため、残高管理用のDBは不要です。ダッシュボードへの履歴表示や過去の運用成績（ドローダウン等）の計算目的でのみ DynamoDB を使用しています。
 
 ## ダッシュボード
 
@@ -243,7 +245,7 @@ Gemini の提案がどうであれ、以下はコードが強制します。
 
 ## 目標と進捗の記録
 
-`GOAL_ASSETS_JPY`(既定13億円)への進捗を毎サイクルログに出し、総資産額を CloudWatch カスタムメトリクス `CoinGod/TotalAssetsJpy` として記録します(EMF形式、DB不要)。
+`GOAL_ASSETS_JPY`(既定13億円)への進捗を毎サイクルログに出し、総資産額を CloudWatch カスタムメトリクス `CoinGod/TotalAssetsJpy` として記録します(EMF形式)。
 CloudWatch のメトリクスグラフで何年分でも資産推移を確認できます。
 
 **注意**: 目標額は売買判断(Geminiへのプロンプト)には渡していません。意図的な設計です — 「1.3万円を13億円にしろ」とモデルに伝えると、期待値の低い一発逆転型の取引に誘導されるためです。判断側の目的関数はあくまで「ドローダウンを避けた長期複利」に固定しています。
@@ -284,6 +286,7 @@ AWS アカウントと認証情報(`aws configure` など)を設定した上で:
 npx ampx sandbox secret set COINCHECK_API_KEY
 npx ampx sandbox secret set COINCHECK_API_SECRET
 npx ampx sandbox secret set GEMINI_API_KEY
+npx ampx sandbox secret set GEMINI_API_KEY_FALLBACK # 任意(予備キー)
 npx ampx sandbox secret set ALLOWED_EMAILS
 
 # サンドボックスとしてデプロイ(起動したまま = デプロイされたまま)
@@ -301,7 +304,8 @@ npx ampx sandbox
 1. `COINCHECK_API_KEY`
 2. `COINCHECK_API_SECRET`
 3. `GEMINI_API_KEY`
-4. `ALLOWED_EMAILS`
+4. `GEMINI_API_KEY_FALLBACK` (任意・エラー時の予備)
+5. `ALLOWED_EMAILS`
 
 ### 5. 実弾に切り替える
 

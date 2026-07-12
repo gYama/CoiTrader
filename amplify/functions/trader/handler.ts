@@ -371,6 +371,7 @@ export async function runTradingCycle(): Promise<void> {
     requireEnv('GEMINI_API_KEY'),
     config.geminiModel,
     snapshot,
+    process.env.GEMINI_API_KEY_FALLBACK,
   );
   console.log('gemini outlook:', decision.outlook);
   console.log('gemini proposed orders:', JSON.stringify(decision.orders));

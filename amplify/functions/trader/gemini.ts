@@ -93,6 +93,7 @@ export async function askGeminiForDecision(
   apiKey: string,
   model: string,
   snapshot: PortfolioSnapshot,
+  fallbackApiKey?: string,
 ): Promise<PortfolioDecision> {
   const prompt = [
     'あなたは慎重なリスク管理を最優先する暗号資産ポートフォリオマネージャーです。',
@@ -124,21 +125,33 @@ export async function askGeminiForDecision(
     '出力は指定された JSON スキーマに従うこと。reason と outlook は日本語で簡潔に。',
   ].join('\n');
 
-  const res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
+  const bodyString = JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+      responseSchema: DECISION_SCHEMA,
     },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-        responseSchema: DECISION_SCHEMA,
-      },
-    }),
   });
+
+  const attemptFetch = async (key: string) => {
+    return fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': key,
+      },
+      body: bodyString,
+    });
+  };
+
+  let res = await attemptFetch(apiKey);
+
+  if (!res.ok && fallbackApiKey) {
+    const errText = await res.text();
+    console.warn(`Gemini API error with main key: ${res.status} ${errText}. Retrying with fallback key...`);
+    res = await attemptFetch(fallbackApiKey);
+  }
 
   if (!res.ok) {
     const errText = await res.text();
