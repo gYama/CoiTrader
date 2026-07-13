@@ -160,6 +160,8 @@ const status: StatusData = {
     MIN_LIQUIDITY_JPY: '300000',
     MAX_HOLDINGS: '5',
     DECISION_INTERVAL_MINUTES: '15',
+    MIN_HOLD_HOURS: '6',
+    REBUY_COOLDOWN_HOURS: '6',
     EXCLUDE_PAIRS: 'mona_jpy,bril_jpy,fpl_jpy,iost_jpy,sand_jpy,dai_jpy',
     GOAL_ASSETS_JPY: '1300000000',
     GEMINI_MODEL: 'gemini-3.5-flash',

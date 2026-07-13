@@ -15,6 +15,8 @@ export interface TechnicalIndicators {
   vol24hPct?: number;
   /** 7日レンジ内の現在位置(0=期間安値, 100=期間高値) */
   range7dPosPct?: number;
+  /** 短期・中期SMAに基づくトレンド判定 */
+  trend?: 'UP' | 'DOWN' | 'RANGE';
 }
 
 /** RSI (Wilder の単純平均版)。period+1 点未満のデータでは undefined */
@@ -69,6 +71,21 @@ export function rangePositionPct(pricesOldestFirst: number[]): number | undefine
   return round1(((last - low) / (high - low)) * 100);
 }
 
+/** 短期SMA(3)と中期SMA(12)の比較によるトレンド判定 */
+export function trendIndicator(pricesOldestFirst: number[]): 'UP' | 'DOWN' | 'RANGE' | undefined {
+  if (pricesOldestFirst.length < 12) return undefined;
+  const recent3 = pricesOldestFirst.slice(-3);
+  const recent12 = pricesOldestFirst.slice(-12);
+  const sma3 = recent3.reduce((a, b) => a + b, 0) / 3;
+  const sma12 = recent12.reduce((a, b) => a + b, 0) / 12;
+  if (sma12 <= 0) return undefined;
+
+  const diffPct = ((sma3 - sma12) / sma12) * 100;
+  if (diffPct > 1.0) return 'UP';
+  if (diffPct < -1.0) return 'DOWN';
+  return 'RANGE';
+}
+
 /**
  * 1ペア分の指標セットを構築する。
  * history24h は1時間ごと(約25点)、history7d は6時間ごと(約29点)の系列を想定。
@@ -83,6 +100,7 @@ export function buildIndicators(
     ma6hDevPct: smaDeviationPct(history24h, 6),
     vol24hPct: returnsVolatilityPct(history24h),
     range7dPosPct: rangePositionPct(history7d),
+    trend: trendIndicator(history24h),
   };
   const hasAny = Object.values(indicators).some((v) => v !== undefined);
   return hasAny ? indicators : undefined;

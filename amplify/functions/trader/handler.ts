@@ -1,7 +1,13 @@
 import type { EventBridgeHandler } from 'aws-lambda';
 import { GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { CoincheckClient, type AccountInfo, type PairTicker } from './coincheck';
-import { buildPerformance, computeCostBasis, computeDrawdownPct, type CostBasis } from './feedback';
+import {
+  buildPerformance,
+  computeCostBasis,
+  computeDrawdownPct,
+  computeRealizedPnl,
+  type CostBasis,
+} from './feedback';
 import { notifyError } from './notify';
 import { askGeminiForDecision, type PortfolioSnapshot, type ProposedOrder } from './gemini';
 import { buildIndicators } from './indicators';
@@ -85,6 +91,10 @@ interface Config {
   /** Gemini への売買判断を行う間隔(分)。記録・ブレーカー・ストップロスは15分ごとのまま。
    * 15分サイクルの倍数(15/30/60)のみサポート */
   decisionIntervalMinutes: number;
+  /** 買ってからこの時間(h)は売らない(機械的ストップロスは例外)。買い直後の反転売り対策 */
+  minHoldHours: number;
+  /** 売ってからこの時間(h)は同じ通貨を買い直さない。往復売買(チャーン)対策 */
+  rebuyCooldownHours: number;
   /** 取得単価からこの割合(%)下落したら Gemini の判断を待たず全量売却する。0以下で無効 */
   stopLossPct: number;
   excludePairs: Set<string>;
@@ -108,6 +118,8 @@ function loadConfig(): Config {
     minLiquidityJpy: Number(process.env.MIN_LIQUIDITY_JPY ?? 100000),
     maxHoldings: Number(process.env.MAX_HOLDINGS ?? 6),
     decisionIntervalMinutes: Number(process.env.DECISION_INTERVAL_MINUTES ?? 15),
+    minHoldHours: Number(process.env.MIN_HOLD_HOURS ?? 6),
+    rebuyCooldownHours: Number(process.env.REBUY_COOLDOWN_HOURS ?? 6),
     stopLossPct: Number(process.env.STOP_LOSS_PCT ?? 10),
     excludePairs: new Set(
       (process.env.EXCLUDE_PAIRS ?? '')
@@ -280,6 +292,24 @@ export async function runTradingCycle(): Promise<void> {
     }
   }
 
+  // 行動不能ペアのフィルタ: 買いも売りもガードレールで確実に拒否されるペアは
+  // Gemini に見せない(実績: 流動性不足の TRX 売却提案が12回繰り返された)。
+  // 保有中は売り床(買い床の1/10)、未保有は買い床の売買代金がなければ何もできない。
+  // 流動性が戻れば次のサイクルから自動的に再登場する
+  for (const [pair, ticker] of tickers) {
+    const currency = pair.split('_')[0];
+    const heldValue = holdings.find((h) => h.currency === currency)?.jpyValue ?? 0;
+    const actionableFloor =
+      heldValue >= MIN_ORDER_NOTIONAL_JPY ? config.minLiquidityJpy / 10 : config.minLiquidityJpy;
+    if (ticker.quote_volume < actionableFloor) {
+      console.log(
+        `excluding ${pair}: 24h volume ${Math.round(ticker.quote_volume)} JPY < ` +
+          `actionable floor ${Math.round(actionableFloor)} JPY (${heldValue > 0 ? 'held but unsellable' : 'not buyable'})`,
+      );
+      tickers.delete(pair);
+    }
+  }
+
   logProgress(totalAssetsJpy, config.goalAssetsJpy);
 
   // スイッチOFFなら記録だけして終了(売買判断は行わない)
@@ -332,6 +362,16 @@ export async function runTradingCycle(): Promise<void> {
   // 実注文の履歴(古い順)から通貨ごとの平均取得単価を復元する
   const pastOrders = (await queryRecentOrders()).reverse();
   const costBasis = computeCostBasis(pastOrders);
+
+  // 通貨ごとの直近売買時刻。最低保有時間・再購入クールダウンの判定に使う
+  const lastBuyMs = new Map<string, number>();
+  const lastSellMs = new Map<string, number>();
+  for (const o of pastOrders) {
+    if (o.type !== 'order' || o.dryRun || !o.pair) continue;
+    const cur = o.pair.split('_')[0];
+    if (o.action === 'buy') lastBuyMs.set(cur, o.t);
+    else lastSellMs.set(cur, o.t);
+  }
 
   // 機械的ストップロス: 損切りは判断ではなくルールとして強制する(ドローダウンを浅く保つ最後の砦)
   const stopped = await applyStopLoss({ config, coincheck, tickers, holdings, costBasis });
@@ -393,10 +433,15 @@ export async function runTradingCycle(): Promise<void> {
       reason: e.reason,
     }));
 
+  // 評価額が最低注文額未満のダスト保有は売却不能で判断対象にもならないため
+  // Gemini には見せない(実績: 評価額0円の IOST への売却提案が13回繰り返された)
+  const visibleHoldings = activeHoldings.filter((h) => h.jpyValue >= MIN_ORDER_NOTIONAL_JPY);
+
   const snapshot: PortfolioSnapshot = {
     markets: [...tickers.values()].map((t) => {
       const priceHistory24h = getPriceHistory(snapshots, t.pair, 24, 1);
       const priceHistory7d = getPriceHistory(snapshots, t.pair, 24 * 7, 6);
+      const spreadPct = t.bid > 0 ? ((t.ask - t.bid) / t.bid) * 100 : undefined;
       return {
         pair: t.pair,
         last: t.last,
@@ -404,13 +449,14 @@ export async function runTradingCycle(): Promise<void> {
         low24h: t.low,
         changePct24h: t.price_change_percent_24h * 100,
         quoteVolumeJpy: Math.round(t.quote_volume),
+        spreadPct: spreadPct !== undefined ? Math.round(spreadPct * 100) / 100 : undefined,
         takerFeePct: takerFeePctFor(t.pair, accounts),
         priceHistory24h,
         priceHistory7d,
         indicators: buildIndicators(priceHistory24h, priceHistory7d),
       };
     }),
-    portfolio: { jpyAvailable, totalAssetsJpy, holdings: activeHoldings },
+    portfolio: { jpyAvailable, totalAssetsJpy, holdings: visibleHoldings },
     constraints: {
       maxOrdersPerCycle: config.maxOrdersPerCycle,
       maxOrderJpy: Math.floor(maxOrderJpy),
@@ -418,8 +464,12 @@ export async function runTradingCycle(): Promise<void> {
       minJpyReserve: Math.ceil(minJpyReserve),
       minLiquidityJpy: config.minLiquidityJpy,
       maxHoldings: config.maxHoldings,
+      minHoldHours: config.minHoldHours,
+      rebuyCooldownHours: config.rebuyCooldownHours,
     },
-    performance,
+    // 確定損益と勝敗も渡す。自分の売買が損を出し続けているとき、それを
+    // 認識せずに同じ頻度・同じ型の取引を続けるのを防ぐ
+    performance: { ...performance, realized: computeRealizedPnl(pastOrders) },
     recentOrders,
     recentSkips,
   };
@@ -478,6 +528,8 @@ export async function runTradingCycle(): Promise<void> {
         totalAssetsJpy,
         maxOrderJpy,
         jpySpendable,
+        lastBuyMs,
+        lastSellMs,
       });
       if (done !== null) {
         executed += 1;
@@ -618,6 +670,10 @@ interface ExecutionContext {
   totalAssetsJpy: number;
   maxOrderJpy: number;
   jpySpendable: number;
+  /** 通貨ごとの直近の買い時刻(ms)。最低保有時間の判定に使う */
+  lastBuyMs: Map<string, number>;
+  /** 通貨ごとの直近の売り時刻(ms)。再購入クールダウンの判定に使う */
+  lastSellMs: Map<string, number>;
 }
 
 /**
@@ -666,6 +722,29 @@ async function executeWithGuardrails(
   const minLot = MIN_LOT[currency] ?? 0;
 
   if (order.action === 'buy') {
+    // 再購入クールダウン: 売った直後の買い直し(往復売買)は新情報のない判断のブレで
+    // あることが多く、スプレッド分だけ確実に損をする(実績: XRP を24時間で3往復)
+    const lastSell = ctx.lastSellMs.get(currency);
+    if (config.rebuyCooldownHours > 0 && lastSell !== undefined) {
+      const hoursSinceSell = (Date.now() - lastSell) / 3600_000;
+      if (hoursSinceSell < config.rebuyCooldownHours) {
+        return skipOrder(
+          order,
+          `売却から ${hoursSinceSell.toFixed(1)} 時間しか経っていない ` +
+            `(再購入クールダウン ${config.rebuyCooldownHours} 時間)`,
+          config.dryRun,
+        );
+      }
+    }
+    // スプレッドガード: 隠れコスト(スプレッド)が広すぎる銘柄は買わない
+    const spreadPct = ticker.bid > 0 ? ((ticker.ask - ticker.bid) / ticker.bid) * 100 : 0;
+    if (spreadPct > 5.0) {
+      return skipOrder(
+        order,
+        `スプレッド率 ${spreadPct.toFixed(2)}% が上限 5.0% を超えているため新規買いを見送り(確実な損失の回避)`,
+        config.dryRun,
+      );
+    }
     // 銘柄数ガード: 小資本で銘柄数を増やすと1銘柄の勝ちが総資産に効かず、
     // スリッページと最低売却数量の制約だけが増える。新規銘柄は上限未満のときのみ。
     // 評価額が最低注文額未満の保有(塩漬けダスト)は「保有銘柄」に数えない
@@ -725,8 +804,32 @@ async function executeWithGuardrails(
   }
 
   // sell
+  // 最低保有時間: 買った直後の反転売りを禁止する(機械的ストップロスはこの関数を
+  // 通らないため対象外)。15〜30分での buy → sell_half が頻発し、往復コストだけが
+  // 積み上がった実績への対策
+  const lastBuy = ctx.lastBuyMs.get(currency);
+  if (config.minHoldHours > 0 && lastBuy !== undefined) {
+    const hoursSinceBuy = (Date.now() - lastBuy) / 3600_000;
+    if (hoursSinceBuy < config.minHoldHours) {
+      return skipOrder(
+        order,
+        `購入から ${hoursSinceBuy.toFixed(1)} 時間しか経っていない ` +
+          `(最低保有時間 ${config.minHoldHours} 時間。ストップロスはこの制限の対象外)`,
+        config.dryRun,
+      );
+    }
+  }
+
   const held = holding?.amount ?? 0;
-  let coinAmount = order.action === 'sell_half' ? held / 2 : held;
+  // 半分に割ると最低注文額を下回る小さなポジションは全量売却に切り替える。
+  // 半量だけ売ると残りが売却不能なダストになる(実績: 325円の sell_half 提案が10回スキップされた)
+  const escalateToFull =
+    order.action === 'sell_half' && (held / 2) * ticker.last < MIN_ORDER_NOTIONAL_JPY;
+  const effectiveAction = escalateToFull ? 'sell_all' : order.action;
+  const reason = escalateToFull
+    ? `${order.reason}(半量では最低注文額 ${MIN_ORDER_NOTIONAL_JPY} 円未満のため全量売却に切替)`
+    : order.reason;
+  let coinAmount = effectiveAction === 'sell_half' ? held / 2 : held;
   // 最低数量が大きい通貨は、保有が足りていれば最低数量まで引き上げる(円への回収方向のみ許容)
   if (coinAmount < minLot && held >= minLot) coinAmount = minLot;
   coinAmount = Number(coinAmount.toFixed(8));
@@ -741,21 +844,21 @@ async function executeWithGuardrails(
   }
   if (config.dryRun) {
     console.log(
-      `[DRY_RUN] would market-sell ${coinAmount} ${currency} (~${Math.floor(notionalJpy)} JPY) on ${order.pair} — ${order.reason}`,
+      `[DRY_RUN] would market-sell ${coinAmount} ${currency} (~${Math.floor(notionalJpy)} JPY) on ${order.pair} — ${reason}`,
     );
     await saveEvent({
-      type: 'order', dryRun: true, pair: order.pair, action: order.action,
+      type: 'order', dryRun: true, pair: order.pair, action: effectiveAction,
       sizeCoin: coinAmount, sizeJpy: Math.floor(notionalJpy), price: ticker.last,
-      reason: order.reason,
+      reason,
     });
     return { jpySpendableAfter: ctx.jpySpendable };
   }
   const result = await coincheck.marketSell(order.pair, coinAmount);
   console.log(`sell order placed for ${order.pair}:`, JSON.stringify(result));
   await saveEvent({
-    type: 'order', dryRun: false, pair: order.pair, action: order.action,
+    type: 'order', dryRun: false, pair: order.pair, action: effectiveAction,
     sizeCoin: coinAmount, sizeJpy: Math.floor(notionalJpy), price: ticker.last,
-    reason: order.reason, orderId: result.id,
+    reason, orderId: result.id,
   });
   return { jpySpendableAfter: ctx.jpySpendable };
 }

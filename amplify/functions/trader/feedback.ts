@@ -25,7 +25,10 @@ export function computeCostBasis(ordersOldestFirst: TradeEvent[]): Map<string, C
       const totalCost = b.amount * b.avgPrice + e.sizeJpy;
       b.amount += coins;
       b.avgPrice = totalCost / b.amount;
-    } else if (e.action === 'sell' && e.sizeCoin) {
+    } else if (e.action !== 'buy' && e.sizeCoin) {
+      // 売却系はすべて保有量を減らす(sell=ストップロス, sell_all/sell_half=Gemini提案)。
+      // 'sell' だけを見る旧実装では sell_all/sell_half 後も原価が残り続け、
+      // 再購入時の平均取得単価と含み損益率が汚染されるバグがあった
       b.amount = Math.max(0, b.amount - e.sizeCoin);
       if (b.amount === 0) b.avgPrice = 0;
     }
